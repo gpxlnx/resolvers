@@ -7,59 +7,87 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch: # Permite rodar manualmente se precisar testar
 
-# Actions project permission
+# Evita que múltiplas execuções rodem ao mesmo tempo e causem conflito de git
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
 jobs:
-  resfresh-list:
+  refresh-list:
     runs-on: ubuntu-latest
 
     steps:
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
+      # Checkout do seu repositório principal
       - name: Check out repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
+        with:
+          ref: main
 
+      # Checkout da ferramenta (DNS Validator)
       - name: Checkout DNS Validator
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           repository: 'vortexau/dnsvalidator'
-          path: dnsvalidator
-    
+          path: dnsvalidator_tool # Renomeei para evitar confusão com pastas locais
+
       - name: Install DNS Validator
         run: |
-          cd dnsvalidator
-          python3 setup.py install
+          cd dnsvalidator_tool
+          pip install .
       
-      - name: Install Package
+      - name: Install System Dependencies
         run: |
-          pip3 install contextvars
-          sudo apt install parallel -y
+          sudo apt-get update
+          sudo apt-get install -y parallel
+          pip install contextvars
 
       - name: Generate new resolvers
         run: |
+          # Verifica se o arquivo de entrada existe antes de prosseguir
+          if [ ! -f unstable_resolvers.txt ]; then
+            echo "unstable_resolvers.txt not found!"
+            exit 1
+          fi
+
           split -n l/8 unstable_resolvers.txt part_
+          
+          # Aumentei o timeout ou mantive a lógica original
           ls part_* | parallel -j 8 'dnsvalidator -tL {} -threads 200 --silent > {}_resolvers.txt'
+          
+          # Junta os resultados
           cat part_*_resolvers.txt > resolvers.txt
 
-          rm -rf part_* part_*_resolvers.txt
+          # Limpeza
+          rm -rf part_* part_*_resolvers.txt dnsvalidator_tool
 
-      - name: Commit and push changes if there are any
+      - name: Commit and push changes
         run: |
           git config --global user.name 'GitHub Actions'
           git config --global user.email 'actions@users.noreply.github.com'
-          git add .
           
-          # Check if there are changes before committing
+          # Adiciona APENAS o arquivo gerado para evitar commitar lixo
+          git add resolvers.txt
+          
+          # Verifica se houve mudança real
           if ! git diff --cached --exit-code; then
             IST_DATE=$(TZ='Asia/Kolkata' date +'%a %b %d %H:%M:%S IST %Y')
             git commit -m "Updated List: $IST_DATE"
-            git push
+            
+            # --- A CORREÇÃO MÁGICA ESTÁ AQUI ---
+            # Tenta puxar as mudanças remotas e reaplicar o commit atual no topo
+            # Loop simples para tentar algumas vezes em caso de conflito momentâneo
+            git pull --rebase origin main
+            git push origin main
           else
             echo "No changes to commit"
           fi
